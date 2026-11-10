@@ -7,6 +7,7 @@ const REPORT_ID_MONITOR = 101;
 const STICKY_FLAG = 1 << 0;
 const TAP_FLAG = 1 << 1;
 const HOLD_FLAG = 1 << 2;
+const REPEAT_FLAG = 1 << 3;
 const CONFIG_SIZE = 32;
 const CONFIG_VERSION = 18;
 const VENDOR_ID = 0xCAFE;
@@ -31,6 +32,7 @@ const QUIRK_FLAG_SIGNED_MASK = 0b01000000;
 const QUIRK_SIZE_MASK = 0b00111111;
 
 const LAYERS_USAGE_PAGE = 0xFFF10000;
+const MACRO_USAGE_PAGE = 0xFFF20000;
 const EXPR_USAGE_PAGE = 0xFFF30000;
 const MIDI_USAGE_PAGE = 0xFFF70000;
 const BUTTON_USAGE_PAGE = 0x00090000;
@@ -155,6 +157,7 @@ let config = {
         'sticky': false,
         'tap': false,
         'hold': false,
+        'repeat': false,
         'scaling': DEFAULT_SCALING,
         'source_port': 0,
         'target_port': 0,
@@ -319,6 +322,7 @@ async function load_from_device() {
                 'sticky': (mapping_flags & STICKY_FLAG) != 0,
                 'tap': (mapping_flags & TAP_FLAG) != 0,
                 'hold': (mapping_flags & HOLD_FLAG) != 0,
+                'repeat': (mapping_flags & REPEAT_FLAG) != 0,
                 'source_port': hub_ports & 0x0F,
                 'target_port': (hub_ports >> 4) & 0x0F,
             });
@@ -463,7 +467,8 @@ async function save_to_device() {
                 [UINT8, layer_list_to_mask(mapping['layers'])],
                 [UINT8, (mapping['sticky'] ? STICKY_FLAG : 0)
                     | (mapping['tap'] ? TAP_FLAG : 0)
-                    | (mapping['hold'] ? HOLD_FLAG : 0)],
+                    | (mapping['hold'] ? HOLD_FLAG : 0)
+                    | (mapping['repeat'] ? REPEAT_FLAG : 0)],
                 [UINT8, ((mapping['target_port'] & 0x0F) << 4) | (mapping['source_port'] & 0x0F)],
             ]);
         }
@@ -767,6 +772,13 @@ function set_ui_state() {
     if (config['version'] < CONFIG_VERSION) {
         config['version'] = CONFIG_VERSION;
     }
+    // "repeat" was added without a config version bump (it's just a new bit in the flags byte),
+    // so default it for any config that doesn't have it.
+    for (const mapping of config['mappings']) {
+        if (!('repeat' in mapping)) {
+            mapping['repeat'] = false;
+        }
+    }
 
     set_config_ui_state();
     set_mappings_ui_state();
@@ -800,6 +812,9 @@ function add_mapping(mapping) {
     const hold_checkbox = clone.querySelector(".hold_checkbox");
     hold_checkbox.checked = mapping['hold'];
     hold_checkbox.addEventListener("change", hold_onclick(mapping, hold_checkbox));
+    const repeat_checkbox = clone.querySelector(".repeat_checkbox");
+    repeat_checkbox.checked = mapping['repeat'];
+    repeat_checkbox.addEventListener("change", repeat_onclick(mapping, repeat_checkbox));
     const scaling_input = clone.querySelector(".scaling_input");
     scaling_input.value = mapping['scaling'] / 1000;
     scaling_input.addEventListener("input", scaling_onchange(mapping, scaling_input));
@@ -1056,6 +1071,12 @@ function hold_onclick(mapping, element) {
     };
 }
 
+function repeat_onclick(mapping, element) {
+    return function () {
+        mapping['repeat'] = element.checked;
+    };
+}
+
 function scaling_onchange(mapping, element) {
     return function () {
         mapping['scaling'] = element.value === '' ? DEFAULT_SCALING : Math.round(parseFloat(element.value) * 1000);
@@ -1145,7 +1166,7 @@ function show_usage_modal(mapping_, source_or_target, element_) {
                     set_forced_layers(mapping, element.closest(".mapping_container"));
                 }
 
-                if (source_or_target == "source") {
+                if ((source_or_target == "source") || (source_or_target == "target")) {
                     set_forced_flags(mapping, element.closest(".mapping_container"));
                 }
 
@@ -1188,6 +1209,7 @@ function add_empty_mapping(source_usage = '0x00000000') {
         'sticky': false,
         'tap': false,
         'hold': false,
+        'repeat': false,
         'scaling': DEFAULT_SCALING,
         'source_port': 0,
         'target_port': 0,
@@ -1588,6 +1610,16 @@ function set_forced_flags(mapping, mapping_container) {
         mapping['sticky'] = false;
         mapping['tap'] = false;
         mapping['hold'] = false;
+    }
+    // "repeat" only does something for mappings that trigger a macro
+    const repeat_checkbox = mapping_container.querySelector(".repeat_checkbox");
+    const target_int = parseInt(mapping['target_usage'], 16);
+    if (((target_int & 0xFFFF0000) >>> 0) == MACRO_USAGE_PAGE) {
+        repeat_checkbox.disabled = false;
+    } else {
+        repeat_checkbox.checked = false;
+        repeat_checkbox.disabled = true;
+        mapping['repeat'] = false;
     }
 }
 
