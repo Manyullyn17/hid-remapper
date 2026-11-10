@@ -22,6 +22,7 @@
 const uint8_t MAPPING_FLAG_STICKY = 1 << 0;
 const uint8_t MAPPING_FLAG_TAP = 1 << 1;
 const uint8_t MAPPING_FLAG_HOLD = 1 << 2;
+const uint8_t MAPPING_FLAG_REPEAT = 1 << 3;
 
 const uint8_t V_RESOLUTION_BITMASK = (1 << 0);
 const uint8_t H_RESOLUTION_BITMASK = (1 << 2);
@@ -93,12 +94,22 @@ uint8_t layer_state_mask = 1;
 
 std::vector<int32_t*> relative_usages;  // input_state pointers
 
+#define NO_REPEAT_SLOT 0xFFFF
+
 struct macro_entry_t {
     uint8_t duration_left;
     std::vector<uint32_t> items;
+    uint16_t repeat_slot = NO_REPEAT_SLOT;  // which repeat mapping queued this entry, if any
+    uint32_t repeat_generation = 0;
 };
 
 std::queue<macro_entry_t> macro_queue;
+
+// For mappings with the repeat flag: number of entries each one currently has in macro_queue.
+// A repeat mapping only re-queues its macro when this drops to zero, so the queue can't grow without bound.
+std::vector<uint16_t> macro_repeat_pending;
+// Bumped on every config reload so that entries queued under an old config don't touch the new counters.
+uint32_t macro_repeat_generation = 0;
 
 uint32_t reports_received;
 uint32_t reports_sent;
@@ -392,6 +403,8 @@ void set_mapping_from_config() {
     reverse_mapping.clear();
     reverse_mapping_macros.clear();
     reverse_mapping_layers.clear();
+    macro_repeat_pending.clear();
+    macro_repeat_generation++;
     used_state_slots = 0;
     usage_state_ptr.clear();
     register_ptrs.clear();
@@ -442,6 +455,7 @@ void set_mapping_from_config() {
                 .sticky = (mapping.flags & MAPPING_FLAG_STICKY) != 0,
                 .tap = (mapping.flags & MAPPING_FLAG_TAP) != 0,
                 .hold = (mapping.flags & MAPPING_FLAG_HOLD) != 0,
+                .repeat = (mapping.flags & MAPPING_FLAG_REPEAT) != 0,
                 .orig_source_port = orig_source_port,
                 .layer_mask = layer_mask,
                 .input_state = get_state_ptr(mapping.source_usage, source_port),
@@ -691,6 +705,12 @@ void set_mapping_from_config() {
             }
         }
         if ((target & 0xFFFF0000) == MACRO_USAGE_PAGE) {
+            for (auto& source : rev_map.sources) {
+                if (source.repeat) {
+                    source.repeat_slot = macro_repeat_pending.size();
+                    macro_repeat_pending.push_back(0);
+                }
+            }
             reverse_mapping_macros.push_back(rev_map);
         } else if ((target & 0xFFFF0000) == LAYERS_USAGE_PAGE) {
             reverse_mapping_layers.push_back(rev_map);
@@ -1188,13 +1208,38 @@ void process_mapping(bool auto_repeat) {
             continue;
         }
         for (auto const& map_source : rev_map.sources) {
-            if ((layer_state_mask & map_source.layer_mask) &&
-                ((!map_source.tap && !map_source.hold && (*(map_source.input_state + PREV_STATE_OFFSET) == 0) && (*map_source.input_state != 0)) ||
-                    (map_source.hold && map_source.tap_hold_state->hold && !map_source.tap_hold_state->prev_hold) ||
-                    (map_source.tap && map_source.tap_hold_state->tap))) {
+            bool trigger;
+            if (map_source.repeat) {
+                // Level-based: (re)queue the macro whenever the input is active
+                // and the previous cycle queued by this mapping has finished.
+                bool active;
+                if (map_source.sticky) {
+                    // Same semantics as other sticky outputs: stays on regardless
+                    // of the currently active layer until toggled off.
+                    active = (*map_source.sticky_state & map_source.layer_mask) != 0;
+                } else {
+                    active = (layer_state_mask & map_source.layer_mask) &&
+                             (map_source.hold  ? map_source.tap_hold_state->hold
+                              : map_source.tap ? map_source.tap_hold_state->tap
+                                               : (*map_source.input_state != 0));
+                }
+                trigger = active && (macro_repeat_pending[map_source.repeat_slot] == 0);
+            } else {
+                trigger = (layer_state_mask & map_source.layer_mask) &&
+                          ((!map_source.tap && !map_source.hold && (*(map_source.input_state + PREV_STATE_OFFSET) == 0) && (*map_source.input_state != 0)) ||
+                              (map_source.hold && map_source.tap_hold_state->hold && !map_source.tap_hold_state->prev_hold) ||
+                              (map_source.tap && map_source.tap_hold_state->tap));
+            }
+            if (trigger) {
                 my_mutex_enter(MutexId::MACROS);
                 for (auto const& usages : macros[macro]) {
-                    macro_queue.push((macro_entry_t){ duration_left : macro_entry_duration, items : usages });
+                    macro_entry_t entry = { duration_left : macro_entry_duration, items : usages };
+                    if (map_source.repeat) {
+                        entry.repeat_slot = map_source.repeat_slot;
+                        entry.repeat_generation = macro_repeat_generation;
+                        macro_repeat_pending[map_source.repeat_slot]++;
+                    }
+                    macro_queue.push(entry);
                 }
                 my_mutex_exit(MutexId::MACROS);
             }
@@ -1358,6 +1403,13 @@ void process_mapping(bool auto_repeat) {
             macro_queue.front().duration_left--;
         } else {
             if (or_items == 0) {
+                const macro_entry_t& front = macro_queue.front();
+                if ((front.repeat_slot != NO_REPEAT_SLOT) &&
+                    (front.repeat_generation == macro_repeat_generation) &&
+                    (front.repeat_slot < macro_repeat_pending.size()) &&
+                    (macro_repeat_pending[front.repeat_slot] > 0)) {
+                    macro_repeat_pending[front.repeat_slot]--;
+                }
                 macro_queue.pop();
             }
         }

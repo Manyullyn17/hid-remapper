@@ -136,6 +136,7 @@ struct map_source_t {
     bool sticky = false;
     bool tap = false;
     bool hold = false;
+    bool repeat = false;
     bool is_relative = false;
     bool is_binary = false;
     uint8_t orig_source_port = 0;
@@ -145,6 +146,7 @@ struct map_source_t {
     uint8_t* sticky_state;
     int32_t accumulated_scroll;
     uint64_t last_scroll_timestamp;  // XXX we can make this 32 or less bits
+    uint16_t repeat_slot = 0;        // index into macro_repeat_pending, only for repeat macro mappings
 };
 
 struct out_usage_def_t {

@@ -78,6 +78,7 @@ for mapping in config.get("mappings", []):
     if version >= 5:
         flags |= TAP_FLAG if mapping.get("tap", False) else 0
         flags |= HOLD_FLAG if mapping.get("hold", False) else 0
+        flags |= REPEAT_FLAG if mapping.get("repeat", False) else 0
     hub_ports = ((mapping.get("target_port", 0) & 0x0F) << 4) | (
         mapping.get("source_port", 0) & 0x0F
     )
